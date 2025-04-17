@@ -18,10 +18,13 @@ codeunit 50650 "Line Adder For Purchase Line"
     [EventSubscriber(ObjectType::Table, Database::"Purchase Line", OnAfterModifyEvent, '', false, false)]
     local procedure modificationProcedure(var Rec: Record "Purchase Line")
     var
+        stillModifyProcessing: Codeunit "Modify Processing Checker";
         purchaseLine: Record "Purchase Line";
         item: Record Item;
         PurchaseHeader: Record "Purchase Header";
     begin
+        if stillModifyProcessing.isProcessing() then
+            exit;
         if (Rec."Document Type" <> Rec."Document Type"::Order) or (Rec.Type <> Rec.Type::Item) then
             exit;
         purchaseLine.Reset();
@@ -31,15 +34,18 @@ codeunit 50650 "Line Adder For Purchase Line"
         purchaseLine.SetRange("Attached to Line No.", Rec."Line No.");
         if (Rec."No." <> '') and (purchaseLine.IsEmpty) then begin
             if (item.Get(Rec."No.")) and (item."Comment Field" <> '') then begin
+                PurchaseHeader.Get(Rec."Document Type", Rec."Document No.");
                 purchaseLine.Reset();
                 purchaseLine.SetRange("Document Type", Rec."Document Type");
                 purchaseLine.SetRange("Document No.", Rec."Document No.");
                 purchaseLine.SetFilter("Line No.", '>%1', Rec."Line No.");
+                // Message('1');
                 //This runs if user modifies lines in between.
                 if not purchaseLine.IsEmpty then begin
-                    reassignLineNoByIncreasingIt(purchaseLine)
+                    // Message('2');
+                    reassignLineNoByIncreasingIt(purchaseLine, PurchaseHeader."No.");
                 end;
-                PurchaseHeader.Get(Rec."Document Type", Rec."Document No.");
+                // Message('3');
                 insertNewSalesLine(Rec."Line No.", PurchaseHeader, item);
             end;
         end;
@@ -78,29 +84,88 @@ codeunit 50650 "Line Adder For Purchase Line"
         newPurchaseLine.Insert(true);
     end;
 
-    local procedure reassignLineNoByIncreasingIt(var purchaseLine: Record "Purchase Line")
+    local procedure reassignLineNoByIncreasingIt(var purchaseLine: Record "Purchase Line"; documentNo: Code[20])
     var
+        stillModifyProcessing: Codeunit "Modify Processing Checker";
+        reassignAttachedToLineNoForPurchaseLine: Record "Purchase Line";
+        deletePurchaseLine: Record "Purchase Line";
         newPurchaseLine: Record "Purchase Line";
         insertProcessingChecker: Codeunit "Insert Processing Checker";
         deleteProcessingChecker: Codeunit "Delete Processing Checker";
+        lineNumberList: List of [Integer];
+        count: Integer;
+        i: Integer;
     begin
-        purchaseLine.FindLast();
+        Message('Came to reassignLineNoByIncreasingIt');
+        purchaseLine.FindSet();
         repeat
-            newPurchaseLine.TransferFields(purchaseLine);
-            newPurchaseLine.Validate("Document Type", purchaseLine."Document Type");
-            newPurchaseLine.Validate("Document No.", purchaseLine."Document No.");
-            newPurchaseLine.Validate("Line No.", purchaseLine."Line No." + 10000);
-            insertProcessingChecker.setStillProcessingTrueOrFalse(true);
-            if not newPurchaseLine.Insert(true) then begin
-                insertProcessingChecker.setStillProcessingTrueOrFalse(false);
-                deleteProcessingChecker.setStillProcessingTrueOrFalse(false);
-                exit;
+            lineNumberList.Add(purchaseLine."Line No.");
+        until purchaseLine.Next() = 0;
+
+        lineNumberList.Reverse();
+        count := lineNumberList.Count;
+
+        for i := 1 to count do begin
+            deletePurchaseLine.Get(deletePurchaseLine."Document Type"::Order, documentNo, lineNumberList.Get(i));
+            if deletePurchaseLine.Type = deletePurchaseLine.Type::Comment then begin
+                newPurchaseLine.Init();
+                newPurchaseLine.Validate("Document Type", deletePurchaseLine."Document Type");
+                newPurchaseLine.Validate("Document No.", deletePurchaseLine."Document No.");
+                newPurchaseLine.Validate("Line No.", deletePurchaseLine."Line No." + 10000);
+                newPurchaseLine.Validate(Type, deletePurchaseLine.Type);
+                newPurchaseLine.Validate(Description, deletePurchaseLine.Description);
+                newPurchaseLine.Validate("Attached to Line No.", 0);
+            end else begin
+                newPurchaseLine.TransferFields(deletePurchaseLine);
+                newPurchaseLine.Validate("Document Type", deletePurchaseLine."Document Type");
+                newPurchaseLine.Validate("Document No.", deletePurchaseLine."Document No.");
+                newPurchaseLine.Validate("Line No.", deletePurchaseLine."Line No." + 10000);
             end;
             deleteProcessingChecker.setStillProcessingTrueOrFalse(true);
-            purchaseLine.Delete(true);
-        until purchaseLine.Next(-1) = 0;
+            deletePurchaseLine.Delete(true);
+            insertProcessingChecker.setStillProcessingTrueOrFalse(true);
+            if not newPurchaseLine.Insert() then begin
+                insertProcessingChecker.setStillProcessingTrueOrFalse(false);
+                deleteProcessingChecker.setStillProcessingTrueOrFalse(false);
+                Message('Exited');
+                exit;
+            end;
+
+            if newPurchaseLine.Type <> newPurchaseLine.Type::Comment then begin
+                if reassignAttachedToLineNoForPurchaseLine.Get(newPurchaseLine."Document Type", newPurchaseLine."Document No.", newPurchaseLine."Line No." + 10000) then begin
+                    if reassignAttachedToLineNoForPurchaseLine.Type = reassignAttachedToLineNoForPurchaseLine.Type::Comment then begin
+                        reassignAttachedToLineNoForPurchaseLine.Validate("Attached to Line No.", newPurchaseLine."Line No.");
+                        stillModifyProcessing.setStillProcessingTrueOrFalse(true);
+                        if not reassignAttachedToLineNoForPurchaseLine.Modify(true) then begin
+                            stillModifyProcessing.setStillProcessingTrueOrFalse(false);
+                        end;
+                        stillModifyProcessing.setStillProcessingTrueOrFalse(false);
+                    end;
+                end;
+            end;
+
+        end;
+        for i := count downto 1 do begin
+            lineNumberList.RemoveAt(i);
+        end;
         insertProcessingChecker.setStillProcessingTrueOrFalse(false);
         deleteProcessingChecker.setStillProcessingTrueOrFalse(false);
+        // repeat
+        //     newPurchaseLine.TransferFields(purchaseLine);
+        //     newPurchaseLine.Validate("Document Type", purchaseLine."Document Type");
+        //     newPurchaseLine.Validate("Document No.", purchaseLine."Document No.");
+        //     newPurchaseLine.Validate("Line No.", purchaseLine."Line No." + 10000);
+        //     deleteProcessingChecker.setStillProcessingTrueOrFalse(true);
+        //     purchaseLine.Delete(true);
+        //     insertProcessingChecker.setStillProcessingTrueOrFalse(true);
+        //     if not newPurchaseLine.Insert() then begin
+        //         insertProcessingChecker.setStillProcessingTrueOrFalse(false);
+        //         deleteProcessingChecker.setStillProcessingTrueOrFalse(false);
+        //         exit;
+        //     end;
+        // until purchaseLine.Next(-1) = 0;
+        // insertProcessingChecker.setStillProcessingTrueOrFalse(false);
+        // deleteProcessingChecker.setStillProcessingTrueOrFalse(false);
     end;
 
     local procedure reassignLineNoByDecreasingIt(var purchaseLine: Record "Purchase Line"; deletedItemNo: Code[20])
@@ -134,5 +199,6 @@ codeunit 50650 "Line Adder For Purchase Line"
         until purchaseLine.Next() = 0;
         deleteProcessingChecker.setStillProcessingTrueOrFalse(false);
         insertProcessingChecker.setStillProcessingTrueOrFalse(false);
+        Message('Reassigning Done');
     end;
 }
